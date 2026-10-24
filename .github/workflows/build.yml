@@ -28,7 +28,7 @@ jobs:
       - name: Checkout ioquake3 source
         uses: actions/checkout@v4
         with:
-          repository: ioquake/ioq3
+          repository: Sakura-Research-Lab/ioq3-mm
           ref: ${{ env.IOQ3_REF }}
           path: ioq3
 

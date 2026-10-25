@@ -25,12 +25,14 @@ jobs:
       - name: Checkout this repo (Makefile)
         uses: actions/checkout@v4
 
-      - name: Checkout ioquake3 source
-        uses: actions/checkout@v4
-        with:
-          repository: Sakura-Research-Lab/ioq3-mm
-          ref: ${{ env.IOQ3_REF }}
-          path: ioq3
+      - name: Clone ioquake3 source
+        run: |
+          rm -rf ioq3-src
+          git clone https://github.com/ioquake/ioq3.git ioq3-src
+          git -C ioq3-src checkout "$IOQ3_REF"
+          echo "ioq3 commit: $(git -C ioq3-src rev-parse HEAD)"
+          ls -la ioq3-src | head -n 30
+          test -f ioq3-src/Makefile || { echo "ioq3-src/Makefile missing"; exit 1; }
 
       - name: Checkout Miyoo Mini toolchain definition
         uses: actions/checkout@v4
@@ -64,7 +66,7 @@ jobs:
               [ -n "$SDL_CFG" ] || SDL_CFG=$(find "$SYSROOT" /opt -type f -name sdl-config 2>/dev/null | head -n1)
               echo "SDL_CONFIG=$SDL_CFG"
 
-              make SKIP_FETCH=1 \
+              make SKIP_FETCH=1 SRC_DIR=ioq3-src \
                    CROSS="$CROSS_PREFIX" \
                    SYSROOT="$SYSROOT" \
                    SDL_CONFIG="$SDL_CFG"

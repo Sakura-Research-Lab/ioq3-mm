@@ -10,19 +10,21 @@ on:
         description: "ioquake3 branch, tag or commit to build"
         required: false
         default: "main"
+      sdl2_ref:
+        description: "XK9274/sdl2_miyoo branch, tag or commit"
+        required: false
+        default: "main"
 
 env:
-  TOOLCHAIN_REPO: shauninman/union-miyoomini-toolchain
-  TOOLCHAIN_IMAGE: miyoomini-toolchain
   IOQ3_REF: ${{ github.event.inputs.ioq3_ref || 'main' }}
-  SDL2_TAG: release-2.30.9
+  SDL2_REF: ${{ github.event.inputs.sdl2_ref || 'main' }}
   MIYOO_TC: /opt/miyoomini-toolchain
   DEPS_PREFIX: ${{ github.workspace }}/deps
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Checkout this repo
@@ -34,31 +36,48 @@ jobs:
           git -C ioq3-src checkout "$IOQ3_REF"
           echo "ioq3 commit: $(git -C ioq3-src rev-parse HEAD)"
 
-      - name: Clone toolchain definition
-        run: git clone --depth 1 https://github.com/${TOOLCHAIN_REPO}.git toolchain
-
-      # ioq3 now needs CMake >= 3.25, which the (old Debian) toolchain image
-      # lacks. So we build the image, copy the cross toolchain out of it, and
-      # run the modern CMake from the runner.
-      - name: Build toolchain image and extract cross toolchain
+      - name: Clone Miyoo SDL2 source
         run: |
-          docker build -t "$TOOLCHAIN_IMAGE" toolchain
-          docker create --name tc "$TOOLCHAIN_IMAGE"
+          git clone https://github.com/XK9274/sdl2_miyoo.git sdl2-src
+          git -C sdl2-src checkout "$SDL2_REF"
+          echo "sdl2_miyoo commit: $(git -C sdl2-src rev-parse HEAD)"
+
+      # The SDL2 build script clones XK9274/union-miyoomini-toolchain, builds
+      # it as the Docker image "miyoomini-toolchain", and compiles SDL2 inside it.
+      - name: Build Miyoo SDL2 (with GLES/EGL)
+        run: |
+          cd sdl2-src
+          ./build-scripts/mk_miyoo.sh --docker --enable-gles
+          ls -la output
+          ls include/SDL_config.h
+
+      # ioq3 needs CMake >= 3.25, which that old image lacks, so copy the
+      # cross toolchain out of the image and run the runner's CMake instead.
+      - name: Extract cross toolchain from the image
+        run: |
+          docker create --name tc miyoomini-toolchain
           sudo docker cp tc:/opt/miyoomini-toolchain /opt/
           docker rm tc
           "$MIYOO_TC/bin/arm-linux-gnueabihf-gcc" --version
-          ls "$MIYOO_TC/arm-linux-gnueabihf/libc"
 
-      - name: Cross-compile SDL2
+      - name: Stage SDL2 as a CMake package
         run: |
-          git clone --depth 1 --branch "$SDL2_TAG" https://github.com/libsdl-org/SDL.git sdl2-src
-          cmake -S sdl2-src -B sdl2-build -G "Unix Makefiles" \
-            -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/miyoomini.cmake" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
-            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF
-          cmake --build sdl2-build -j"$(nproc)"
-          cmake --install sdl2-build
+          mkdir -p "$DEPS_PREFIX/include/SDL2" "$DEPS_PREFIX/lib/cmake/SDL2"
+          cp sdl2-src/include/*.h "$DEPS_PREFIX/include/SDL2/"
+          cp sdl2-src/output/libSDL2-2.0.so.0 "$DEPS_PREFIX/lib/"
+          ln -sf libSDL2-2.0.so.0 "$DEPS_PREFIX/lib/libSDL2.so"
+          for f in libEGL.so libGLESv2.so libneonarmmiyoo.so; do
+            [ -f "sdl2-src/$f" ] && cp "sdl2-src/$f" "$DEPS_PREFIX/lib/" || true
+          done
+          cat > "$DEPS_PREFIX/lib/cmake/SDL2/SDL2Config.cmake" <<'CMAKE'
+          get_filename_component(_prefix "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+          set(SDL2_FOUND TRUE)
+          set(SDL2_INCLUDE_DIRS "${_prefix}/include/SDL2")
+          set(SDL2_LIBRARIES "${_prefix}/lib/libSDL2.so")
+          set(SDL2_CFLAGS_OTHER "")
+          CMAKE
+          sed -i 's/^          //' "$DEPS_PREFIX/lib/cmake/SDL2/SDL2Config.cmake"
+          ls -la "$DEPS_PREFIX/lib"
 
       - name: Configure ioquake3
         run: |
@@ -66,6 +85,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/miyoomini.cmake" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$DEPS_PREFIX" \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-shlib-undefined" \
             -DBUILD_SERVER=OFF \
             -DBUILD_RENDERER_GL2=OFF \
             -DBUILD_GAME_QVMS=OFF \
@@ -88,7 +108,7 @@ jobs:
           cp "$BIN" "$OUT/ioquake3"
           find ioq3-build -type f \( -name 'cgame*.so' -o -name 'qagame*.so' -o -name 'ui*.so' \) \
             -exec cp {} "$OUT/baseq3/" \;
-          cp -a "$DEPS_PREFIX"/lib/libSDL2*.so* "$OUT/lib/"
+          cp -a "$DEPS_PREFIX"/lib/*.so* "$OUT/lib/"
           cp package/baseq3/autoexec.cfg "$OUT/baseq3/"
           cp package/launch.sh "$OUT/"
           "$MIYOO_TC/bin/arm-linux-gnueabihf-strip" "$OUT/ioquake3" "$OUT"/baseq3/*.so || true

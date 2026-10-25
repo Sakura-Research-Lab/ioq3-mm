@@ -63,6 +63,15 @@ jobs:
           for d in GLES GLES2 GLES3 EGL KHR; do
             [ -d "/usr/include/$d" ] && cp -r "/usr/include/$d" "$DEPS/include/gles/" || true
           done
+          # Mesa/Khronos GLES headers declare GLsizeiptr/GLintptr as khronos_*
+          # (long) while SDL_opengl_glext.h uses ptrdiff_t (int on 32-bit ARM),
+          # and q3lite includes both. Make the GLES ones match ptrdiff_t.
+          for h in "$DEPS/include/gles/GLES/gl.h" "$DEPS/include/gles/GLES2/gl2.h"; do
+            [ -f "$h" ] || continue
+            sed -i 's/typedef khronos_ssize_t  *GLsizeiptr;/typedef ptrdiff_t GLsizeiptr;/; s/typedef khronos_intptr_t  *GLintptr;/typedef ptrdiff_t GLintptr;/' "$h"
+            sed -i '1i #include <stddef.h>' "$h"
+            grep -n "GLsizeiptr;\|GLintptr;" "$h"
+          done
           cp sdl2-src/output/libSDL2-2.0.so.0 "$DEPS/lib/"
           ln -sf libSDL2-2.0.so.0 "$DEPS/lib/libSDL2.so"
           for f in libEGL.so libGLESv2.so libneonarmmiyoo.so; do

@@ -96,13 +96,26 @@ jobs:
             OPTIMIZE="$ARCHF -O3 -ffast-math -fomit-frame-pointer" \
             OPTIMIZEVM="$ARCHF -O3" \
             SDL_CFLAGS="-I$DEPS/include/SDL2 -D_REENTRANT" \
-            SDL_LIBS="-L$DEPS/lib -lSDL2 -lpthread -Wl,--allow-shlib-undefined -Wl,-rpath-link,$SYSROOT/usr/lib" \
+            SDL_LIBS="-L$DEPS/lib -lSDL2 -lEGL -lGLESv2 -lpthread -Wl,--allow-shlib-undefined -Wl,-rpath-link,$SYSROOT/usr/lib" \
             USE_LOCAL_HEADERS=0 USE_INTERNAL_LIBS=1 \
             BUILD_SERVER=0 BUILD_GAME_SO=0 BUILD_GAME_QVM=0 BUILD_MISSIONPACK=0 \
             USE_OPENAL=0 USE_CURL=0 USE_VOIP=0 USE_MUMBLE=0 \
             USE_CODEC_VORBIS=0 USE_CODEC_OPUS=0 USE_FREETYPE=0
           echo "--- build output ---"
           ls -la q3lite-src/build/release-linux-arm/
+
+      # Which GL functions does the renderer need directly, and which of those
+      # does the Miyoo GLES library (SwiftShader) actually export?
+      - name: Check GL symbol coverage
+        run: |
+          NM="$MIYOO_TC/bin/arm-linux-gnueabihf-nm"
+          R=q3lite-src/build/release-linux-arm/renderer_opengles1_arm.so
+          "$NM" -D --undefined-only "$R" | awk '$2 ~ /^gl/ {print $2}' | sort -u > need.txt || true
+          "$NM" -D --defined-only "$DEPS/lib/libGLESv2.so" | awk '$3 ~ /^gl/ {print $3}' | sort -u > have.txt || true
+          echo "renderer needs $(wc -l < need.txt) gl* symbols; libGLESv2 exports $(wc -l < have.txt)"
+          echo "--- missing from libGLESv2 ---"
+          comm -23 need.txt have.txt || true
+          echo "------------------------------"
 
       - name: Package
         run: |

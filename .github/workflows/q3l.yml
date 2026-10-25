@@ -1,0 +1,124 @@
+name: Build q3lite for Miyoo Mini
+
+on:
+  workflow_dispatch:
+    inputs:
+      q3lite_ref:
+        description: "q3lite branch, tag or commit"
+        required: false
+        default: "dev"
+      sdl2_ref:
+        description: "XK9274/sdl2_miyoo branch, tag or commit"
+        required: false
+        default: "main"
+  push:
+    paths: [".github/workflows/build-q3lite.yml"]
+
+env:
+  Q3LITE_REF: ${{ github.event.inputs.q3lite_ref || 'dev' }}
+  SDL2_REF: ${{ github.event.inputs.sdl2_ref || 'main' }}
+  MIYOO_TC: /opt/miyoomini-toolchain
+  DEPS: ${{ github.workspace }}/deps
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Clone q3lite and Miyoo SDL2
+        run: |
+          git clone https://github.com/cdev-tux/q3lite.git q3lite-src
+          git -C q3lite-src checkout "$Q3LITE_REF"
+          echo "q3lite commit: $(git -C q3lite-src rev-parse HEAD)"
+          git clone https://github.com/XK9274/sdl2_miyoo.git sdl2-src
+          git -C sdl2-src checkout "$SDL2_REF"
+          echo "sdl2_miyoo commit: $(git -C sdl2-src rev-parse HEAD)"
+
+      - name: Build Miyoo SDL2 (with GLES/EGL)
+        run: |
+          cd sdl2-src
+          ./build-scripts/mk_miyoo.sh --docker --enable-gles
+          ls -la output
+          ls include/SDL_config.h
+
+      - name: Extract cross toolchain from the image
+        run: |
+          docker create --name tc miyoomini-toolchain
+          sudo docker cp tc:/opt/miyoomini-toolchain /opt/
+          docker rm tc
+          "$MIYOO_TC/bin/arm-linux-gnueabihf-gcc" --version
+
+      # SDL's GLES headers include <GLES/gl.h>, <EGL/egl.h> etc. Those are
+      # architecture independent, so borrow the Khronos headers from the runner.
+      - name: Stage SDL2 and GLES headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgles-dev libegl-dev
+          mkdir -p "$DEPS/include/SDL2" "$DEPS/include/gles" "$DEPS/lib"
+          cp sdl2-src/include/*.h "$DEPS/include/SDL2/"
+          for d in GLES GLES2 GLES3 EGL KHR; do
+            [ -d "/usr/include/$d" ] && cp -r "/usr/include/$d" "$DEPS/include/gles/" || true
+          done
+          cp sdl2-src/output/libSDL2-2.0.so.0 "$DEPS/lib/"
+          ln -sf libSDL2-2.0.so.0 "$DEPS/lib/libSDL2.so"
+          for f in libEGL.so libGLESv2.so libneonarmmiyoo.so; do
+            [ -f "sdl2-src/$f" ] && cp "sdl2-src/$f" "$DEPS/lib/" || true
+          done
+          ls -la "$DEPS/lib" "$DEPS/include/gles"
+
+      # We deliberately do NOT use q3lite's make-raspberrypi.sh / PLATFORM_TYPE
+      # path: it hardcodes Raspberry Pi flags and /opt/vc libraries. Instead we
+      # drive the regular ioq3-style Makefile and add -DHAVE_GLES ourselves.
+      - name: Build q3lite
+        run: |
+          SYSROOT="$MIYOO_TC/arm-linux-gnueabihf/libc"
+          ARCHF="-mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard"
+          make -C q3lite-src release -j"$(nproc)" \
+            PLATFORM=linux ARCH=arm \
+            CC="$MIYOO_TC/bin/arm-linux-gnueabihf-gcc --sysroot=$SYSROOT" \
+            AR="$MIYOO_TC/bin/arm-linux-gnueabihf-ar" \
+            RANLIB="$MIYOO_TC/bin/arm-linux-gnueabihf-ranlib" \
+            STRIP="$MIYOO_TC/bin/arm-linux-gnueabihf-strip" \
+            CFLAGS="-DHAVE_GLES $ARCHF -isystem $DEPS/include/gles" \
+            OPTIMIZE="$ARCHF -O3 -ffast-math -fomit-frame-pointer" \
+            OPTIMIZEVM="$ARCHF -O3" \
+            SDL_CFLAGS="-I$DEPS/include/SDL2 -D_REENTRANT" \
+            SDL_LIBS="-L$DEPS/lib -lSDL2 -lpthread -Wl,--allow-shlib-undefined -Wl,-rpath-link,$SYSROOT/usr/lib" \
+            USE_LOCAL_HEADERS=0 USE_INTERNAL_LIBS=1 \
+            BUILD_SERVER=0 BUILD_GAME_SO=0 BUILD_GAME_QVM=0 BUILD_MISSIONPACK=0 \
+            USE_OPENAL=0 USE_CURL=0 USE_VOIP=0 USE_MUMBLE=0 \
+            USE_CODEC_VORBIS=0 USE_CODEC_OPUS=0 USE_FREETYPE=0
+          echo "--- build output ---"
+          ls -la q3lite-src/build/release-linux-arm/
+
+      - name: Package
+        run: |
+          B=q3lite-src/build/release-linux-arm
+          OUT=dist/ioquake3
+          mkdir -p "$OUT/baseq3" "$OUT/lib"
+          BIN=$(find "$B" -maxdepth 1 -type f -name '*.arm' ! -name 'renderer_*' ! -name '*ded*' | head -n1)
+          echo "client binary: $BIN"
+          test -n "$BIN"
+          # Keep the name 'ioquake3' so the existing launch.sh / .port file work.
+          cp "$BIN" "$OUT/ioquake3"
+          cp "$B"/renderer_*.so "$OUT/"
+          cp -a "$DEPS"/lib/*.so* "$OUT/lib/"
+          cp package/baseq3/autoexec.cfg "$OUT/baseq3/"
+          # Software GL ES (SwiftShader) is slow: start at 320x240.
+          printf '\n// q3lite on Miyoo: low resolution for the software rasterizer\nseta r_mode "0"\nseta cl_renderer "opengles1"\n' >> "$OUT/baseq3/autoexec.cfg"
+          sed 's#exec ./ioquake3#exec ./ioquake3 +set cl_renderer opengles1#' package/launch.sh > "$OUT/launch.sh"
+          "$MIYOO_TC/bin/arm-linux-gnueabihf-strip" "$OUT/ioquake3" "$OUT"/renderer_*.so || true
+          chmod +x "$OUT/ioquake3" "$OUT/launch.sh"
+          echo "Copy your own pak0.pk3 into baseq3/ (not included)" > "$OUT/README.txt"
+          (cd dist && zip -r ../q3lite-miyoomini.zip ioquake3)
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: q3lite-miyoomini
+          path: q3lite-miyoomini.zip
+          if-no-files-found: error
